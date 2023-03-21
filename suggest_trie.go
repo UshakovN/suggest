@@ -4,7 +4,6 @@ import (
   "container/heap"
   "reflect"
   "sort"
-  "strings"
 )
 
 type SuggestTrieItem struct {
@@ -65,32 +64,35 @@ func (s *SuggestItems) DeduplicateSuggest() {
 }
 
 type SuggestTrieBuilder struct {
-  Descendants []*SuggestTrieDescendant
-  Suggest     []*SuggestItems
+  Descendants  []*SuggestTrieDescendant
+  SuggestItems []*SuggestItems
 }
 
-func (s *SuggestTrieBuilder) addItem(maxItemsPerPrefix int, item *SuggestTrieItem) {
-  class := ""
-  if knownClass, ok := item.OriginalItem.Data["class"]; ok {
-    class = strings.ToLower(knownClass.(string))
-  }
-  for _, suggest := range s.Suggest {
-    if suggest.Class == class {
-      heap.Push(suggest, item)
-      for len(suggest.Suggest) > maxItemsPerPrefix {
-        heap.Pop(suggest)
+func (s *SuggestTrieBuilder) addItem(maxItemsPerPrefix int, item *SuggestTrieItem, itemClasses []string) {
+  for _, class := range itemClasses {
+    var hasClass bool
+    for _, suggest := range s.SuggestItems {
+      if class == suggest.Class {
+        heap.Push(suggest, item)
+        for len(suggest.Suggest) > maxItemsPerPrefix {
+          heap.Pop(suggest)
+        }
+        hasClass = true
+        break
       }
-      return
     }
+    if hasClass {
+      continue
+    }
+    s.SuggestItems = append(s.SuggestItems, &SuggestItems{
+      Class:   class,
+      Suggest: []*SuggestTrieItem{item},
+    })
   }
-  s.Suggest = append(s.Suggest, &SuggestItems{
-    Class:   class,
-    Suggest: []*SuggestTrieItem{item},
-  })
 }
 
-func (s *SuggestTrieBuilder) Add(position int, text string, maxItemsPerPrefix int, item *SuggestTrieItem) {
-  s.addItem(maxItemsPerPrefix, item)
+func (s *SuggestTrieBuilder) Add(position int, text string, maxItemsPerPrefix int, item *SuggestTrieItem, itemClasses []string) {
+  s.addItem(maxItemsPerPrefix, item, itemClasses)
   if position == len(text) {
     return
   }
@@ -109,16 +111,16 @@ func (s *SuggestTrieBuilder) Add(position int, text string, maxItemsPerPrefix in
     }
     s.Descendants = append(s.Descendants, descendant)
   }
-  descendant.Builder.Add(position+1, text, maxItemsPerPrefix, item)
+  descendant.Builder.Add(position+1, text, maxItemsPerPrefix, item, itemClasses)
 }
 
 func (s *SuggestTrieBuilder) Finalize(maxItemsPerPrefix int) {
   for _, descendant := range s.Descendants {
-    if len(s.Descendants) == 1 && reflect.DeepEqual(descendant.Builder.Suggest, s.Suggest) {
-      s.Suggest = nil
+    if len(s.Descendants) == 1 && reflect.DeepEqual(descendant.Builder.SuggestItems, s.SuggestItems) {
+      s.SuggestItems = nil
     }
   }
-  for _, suggest := range s.Suggest {
+  for _, suggest := range s.SuggestItems {
     sort.Slice(suggest.Suggest, func(i, j int) bool {
       return suggest.Suggest[i].Weight > suggest.Suggest[j].Weight
     })

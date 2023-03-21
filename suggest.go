@@ -1,13 +1,14 @@
 package main
 
 import (
-  "google.golang.org/protobuf/proto"
-  "google.golang.org/protobuf/types/known/structpb"
   "io/ioutil"
   "log"
   stpb "main/proto/suggest/suggest_trie"
   "sort"
   "strings"
+
+  "google.golang.org/protobuf/proto"
+  "google.golang.org/protobuf/types/known/structpb"
 )
 
 type SuggestionTextBlock struct {
@@ -26,6 +27,11 @@ type PaginatedSuggestResponse struct {
   PageNumber      int                  `json:"page_number"`
   TotalPagesCount int                  `json:"total_pages_count"`
   TotalItemsCount int                  `json:"total_items_count"`
+}
+
+type SuggestClassesItem struct {
+  Classes []string
+  Item    *stpb.Item
 }
 
 type ProtoTransformer struct {
@@ -49,7 +55,7 @@ func (pt *ProtoTransformer) TransformTrie(builder *SuggestTrieBuilder) (*stpb.Su
     trie.DescendantKeys = append(trie.DescendantKeys, uint32(d.Key))
     trie.DescendantTries = append(trie.DescendantTries, descendant)
   }
-  for _, suggest := range builder.Suggest {
+  for _, suggest := range builder.SuggestItems {
     trieItems := &stpb.ClassItems{
       Class: suggest.Class,
     }
@@ -90,16 +96,17 @@ func BuildSuggest(items []*Item, maxItemsPerPrefix int, postfixWeightFactor floa
   veroheadItemsCount := maxItemsPerPrefix * 2
   builder := &SuggestTrieBuilder{}
   for idx, item := range items {
+    itemClasses := extractItemClasses(item)
     builder.Add(0, item.NormalizedText, veroheadItemsCount, &SuggestTrieItem{
       Weight:       item.Weight,
       OriginalItem: item,
-    })
+    }, itemClasses)
     parts := strings.Split(item.NormalizedText, " ")
     for i := 1; i < len(parts); i++ {
       builder.Add(0, strings.Join(parts[i:], " "), veroheadItemsCount, &SuggestTrieItem{
         Weight:       item.Weight * postfixWeightFactor,
         OriginalItem: item,
-      })
+      }, itemClasses)
     }
     if (idx+1)%100000 == 0 {
       log.Printf("addedd %d items of %d to suggest", idx+1, len(items))
@@ -108,6 +115,29 @@ func BuildSuggest(items []*Item, maxItemsPerPrefix int, postfixWeightFactor floa
   log.Printf("finalizing suggest")
   builder.Finalize(maxItemsPerPrefix)
   return Transform(builder)
+}
+
+func extractItemClasses(item *Item) []string {
+  var classes []string
+  // check duplicates
+  seenClasses := map[string]bool{}
+  // for backward compatibility
+  if deprecatedClassInterface, ok := item.Data["class"]; ok {
+    itemDeprecatedClass := LowerNormalizeString(deprecatedClassInterface.(string))
+    classes = append(classes, itemDeprecatedClass)
+    seenClasses[itemDeprecatedClass] = true
+  }
+  if classesInterface, ok := item.Data["classes"]; ok {
+    itemClasses := classesInterface.([]interface{})
+    for _, classInterface := range itemClasses {
+      itemClass := LowerNormalizeString(classInterface.(string))
+      if _, ok := seenClasses[itemClass]; !ok {
+        classes = append(classes, itemClass)
+        seenClasses[itemClass] = true
+      }
+    }
+  }
+  return classes
 }
 
 func doHighlight(originalPart string, originalSuggest string) []*SuggestionTextBlock {
@@ -140,7 +170,7 @@ func doHighlight(originalPart string, originalSuggest string) []*SuggestionTextB
   return textBlocks
 }
 
-func GetSuggestItems(suggest *stpb.SuggestData, prefix []byte, classes, excludeClasses map[string]bool) []*stpb.Item {
+func GetSuggestItems(suggest *stpb.SuggestData, prefix []byte, requiredClasses, excludedClasses []string) []*stpb.Item {
   trie := suggest.Trie
   for _, c := range prefix {
     found := false
@@ -162,31 +192,57 @@ func GetSuggestItems(suggest *stpb.SuggestData, prefix []byte, classes, excludeC
       break
     }
   }
-  var items []*stpb.Item
+  var classesItems []*SuggestClassesItem
+  classesItemsMap := map[uint32]int{}
+
   for _, suggestItems := range trie.Items {
-    for _, class := range suggestItems.Classes {
-      if _, ok := excludeClasses[class]; ok {
-        continue
+    itemClass := suggestItems.Class
+    for _, itemIndex := range suggestItems.ItemIndexes {
+      if _, ok := classesItemsMap[itemIndex]; !ok {
+        classesItemsMap[itemIndex] = len(classesItems)
+        classesItems = append(classesItems, &SuggestClassesItem{
+          Item: suggest.Items[itemIndex],
+        })
       }
-      if _, ok := classes[class]; !ok && len(classes) > 0 {
-        continue
-      }
-    }
-    if _, ok := classes[suggestItems.Class]; !ok && len(classes) > 0 {
-      continue
-    }
-    for _, itemIdx := range suggestItems.ItemIndexes {
-      items = append(items, suggest.Items[itemIdx])
+      itemIdx := classesItemsMap[itemIndex]
+      classesItems[itemIdx].Classes = append(classesItems[itemIdx].Classes, itemClass)
     }
   }
+  reqClassesMap := PrepareCheckMap(requiredClasses)
+  exclClassesMap := PrepareCheckMap(excludedClasses)
+
+  var items []*stpb.Item
+  for _, classesItem := range classesItems {
+    if itemSatisfyClasses(classesItem.Classes, reqClassesMap, exclClassesMap) {
+      items = append(items, classesItem.Item)
+    }
+  }
+
   sort.Slice(items, func(i, j int) bool {
     return items[i].Weight > items[j].Weight
   })
   return items
 }
 
-func GetSuggest(suggest *stpb.SuggestData, originalPart string, normalizedPart string, classes, excludeClasses map[string]bool) []*SuggestAnswerItem {
-  trieItems := GetSuggestItems(suggest, []byte(normalizedPart), classes, excludeClasses)
+func itemSatisfyClasses(classes []string, reqClassesMap, exclClassesMap map[string]bool) bool {
+  var satisfyClass bool
+  for _, class := range classes {
+    if _, ok := reqClassesMap[class]; ok || len(reqClassesMap) == 0 {
+      satisfyClass = true
+      break
+    }
+  }
+  for _, class := range classes {
+    if _, ok := exclClassesMap[class]; ok {
+      satisfyClass = false
+      break
+    }
+  }
+  return satisfyClass
+}
+
+func GetSuggest(suggest *stpb.SuggestData, originalPart string, normalizedPart string, requiredClasses, excludeClasses []string) []*SuggestAnswerItem {
+  trieItems := GetSuggestItems(suggest, []byte(normalizedPart), requiredClasses, excludeClasses)
   items := make([]*SuggestAnswerItem, 0)
   if trieItems == nil {
     return items

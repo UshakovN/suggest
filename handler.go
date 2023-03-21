@@ -4,13 +4,14 @@ import (
   "bytes"
   "encoding/json"
   "fmt"
-  "github.com/microcosm-cc/bluemonday"
   "log"
   stpb "main/proto/suggest/suggest_trie"
   "math"
   "net/http"
   "net/url"
   "strconv"
+
+  "github.com/microcosm-cc/bluemonday"
 )
 
 type Handler struct {
@@ -117,11 +118,9 @@ func (h *Handler) HandleSuggestRequest(w http.ResponseWriter, r *http.Request) {
   } else {
     normalizedPart = NormalizeString(part, h.Policy)
   }
-  classes := r.URL.Query()["class"]
-  classesMap := PrepareCheckMap(classes)
-  excludeClasses := r.URL.Query()["exclude-class"]
-  excludeClassesMap := PrepareCheckMap(excludeClasses)
-  suggestions := GetSuggest(h.Suggest, part, normalizedPart, classesMap, excludeClassesMap)
+  requiredClasses := r.URL.Query()["class"]
+  excludedClasses := r.URL.Query()["exclude-class"]
+  suggestions := GetSuggest(h.Suggest, part, normalizedPart, requiredClasses, excludedClasses)
   pagingParameters := NewPagingParameters(r.URL.Query())
   if pagingParameters.PaginationOn {
     reportSuccessData(w, pagingParameters.Apply(suggestions))

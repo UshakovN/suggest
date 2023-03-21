@@ -1,9 +1,10 @@
 package main
 
 import (
-  "github.com/microcosm-cc/bluemonday"
   "regexp"
   "strings"
+
+  "github.com/microcosm-cc/bluemonday"
 )
 
 var alphaRegExp = regexp.MustCompile(`[a-zA-Z]+|[0-9]+`)
@@ -50,4 +51,8 @@ func EqualShapedNormalizeString(s string, p *bluemonday.Policy) string {
   s = ToEqualShapedLatin(s)
   s = strings.Join(alphaRegExp.FindAllString(s, -1), " ")
   return s
+}
+
+func LowerNormalizeString(s string) string {
+  return strings.ToLower(strings.TrimSpace(s))
 }
